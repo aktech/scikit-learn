@@ -28,6 +28,7 @@ __all__ = [
 
 ###############################################################################
 # From an image to a graph
+from ..utils.array_compatibility import get_namespace
 
 
 def _make_edges_3d(n_x, n_y, n_z=1):
@@ -52,6 +53,7 @@ def _make_edges_3d(n_x, n_y, n_z=1):
 
 def _compute_gradient_3d(edges, img):
     _, n_y, n_z = img.shape
+    img = img._array if hasattr(img, '_array') else img
     gradient = np.abs(
         img[
             edges[0] // (n_y * n_z),
@@ -103,13 +105,15 @@ def _to_graph(
             dtype = img.dtype
 
     if img is not None:
-        img = np.atleast_3d(img)
+        xp, _ = get_namespace(img)
+        img = _expand_dim_to_atleast3d(xp, img)
+
         weights = _compute_gradient_3d(edges, img)
         if mask is not None:
             edges, weights = _mask_edges_weights(mask, edges, weights)
             diag = img.squeeze()[mask]
         else:
-            diag = img.ravel()
+            diag = xp.reshape(img, -1)
         n_voxels = diag.size
     else:
         if mask is not None:
@@ -125,17 +129,32 @@ def _to_graph(
     diag_idx = np.arange(n_voxels)
     i_idx = np.hstack((edges[0], edges[1]))
     j_idx = np.hstack((edges[1], edges[0]))
+
+    diag_array = diag._array if hasattr(diag, '_array') else diag
+    xp, _ = get_namespace(diag)
     graph = sparse.coo_matrix(
         (
-            np.hstack((weights, weights, diag)),
-            (np.hstack((i_idx, diag_idx)), np.hstack((j_idx, diag_idx))),
+            xp.asarray(np.hstack((weights, weights, diag_array))),
+            (xp.asarray(np.hstack((i_idx, diag_idx))), xp.asarray(np.hstack((j_idx, diag_idx)))),
         ),
         (n_voxels, n_voxels),
         dtype=dtype,
     )
+    if xp.__name__ == 'cupy.array_api':
+        from cupyx.scipy import sparse as cupy_sparse
+        # TODO: should create directly instead of converting
+        graph = cupy_sparse.coo_matrix(graph)
     if return_as is np.ndarray:
         return graph.toarray()
     return return_as(graph)
+
+
+def _expand_dim_to_atleast3d(xp, img):
+    if img.ndim < 2:
+        raise ValueError(f"Not enough dimensions for img: {img.shape}")
+    if img.ndim == 2:
+        img = xp.expand_dims(img, axis=2)
+    return img
 
 
 def img_to_graph(img, *, mask=None, return_as=sparse.coo_matrix, dtype=None):
@@ -169,7 +188,8 @@ def img_to_graph(img, *, mask=None, return_as=sparse.coo_matrix, dtype=None):
     For compatibility, user code relying on this method should wrap its
     calls in ``np.asarray`` to avoid type issues.
     """
-    img = np.atleast_3d(img)
+    xp, _ = get_namespace(img)
+    img = _expand_dim_to_atleast3d(xp, img)
     n_x, n_y, n_z = img.shape
     return _to_graph(n_x, n_y, n_z, mask, img, return_as, dtype)
 

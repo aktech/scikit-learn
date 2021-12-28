@@ -30,6 +30,8 @@ from ..exceptions import PositiveSpectrumWarning
 from ..exceptions import NotFittedError
 from ..exceptions import DataConversionWarning
 
+from sklearn.utils.array_compatibility import get_namespace
+
 FLOAT_DTYPES = (np.float64, np.float32, np.float16)
 
 
@@ -99,22 +101,23 @@ def _assert_all_finite(
 
     if _get_config()["assume_finite"]:
         return
-    X = np.asanyarray(X)
+    xp, _ = get_namespace(X)
+    X = xp.asarray(X)
     # First try an O(n) time, O(1) space solution for the common case that
     # everything is finite; fall back to O(n) space np.isfinite to prevent
     # false positives from overflow in sum method. The sum is also calculated
     # safely to reduce dtype induced overflows.
     is_float = X.dtype.kind in "fc"
-    if is_float and (np.isfinite(_safe_accumulator_op(np.sum, X))):
+    if is_float and xp.all(xp.isfinite(_safe_accumulator_op(xp.sum, X))):
         pass
     elif is_float:
         if (
             allow_nan
-            and np.isinf(X).any()
+            and xp.isinf(X).any()
             or not allow_nan
-            and not np.isfinite(X).all()
+            and not xp.isfinite(X).all()
         ):
-            if not allow_nan and np.isnan(X).any():
+            if not allow_nan and xp.isnan(X).any():
                 type_err = "NaN"
             else:
                 msg_dtype = msg_dtype if msg_dtype is not None else X.dtype
@@ -125,7 +128,7 @@ def _assert_all_finite(
                 not allow_nan
                 and estimator_name
                 and input_name == "X"
-                and np.isnan(X).any()
+                and xp.isnan(X).any()
             ):
                 # Improve the error message on how to handle missing values in
                 # scikit-learn.
@@ -839,7 +842,8 @@ def check_array(
                         )
                     array = array.astype(dtype, casting="unsafe", copy=False)
                 else:
-                    array = np.asarray(array, order=order, dtype=dtype)
+                    xp, _ = get_namespace(array)
+                    xp.asarray(array, dtype=xp.float64)
             except ComplexWarning as complex_warning:
                 raise ValueError(
                     "Complex data not supported\n{}\n".format(array)
@@ -1227,12 +1231,18 @@ def check_symmetric(array, *, tol=1e-10, raise_warning=True, raise_exception=Fal
         and array.transpose(). If sparse, then duplicate entries are first
         summed and zeros are eliminated.
     """
+    xp, array_api = get_namespace(array.data)
+    if xp.__name__ == 'cupy.array_api':
+        from cupyx.scipy import sparse as cupy_sparse
+        sparse_module = cupy_sparse
+    else:
+        sparse_module = sp
     if (array.ndim != 2) or (array.shape[0] != array.shape[1]):
         raise ValueError(
             "array must be 2-dimensional and square. shape = {0}".format(array.shape)
         )
 
-    if sp.issparse(array):
+    if sparse_module.issparse(array):
         diff = array - array.T
         # only csr, csc, and coo have `data` attribute
         if diff.format not in ["csr", "csc", "coo"]:
@@ -1250,7 +1260,7 @@ def check_symmetric(array, *, tol=1e-10, raise_warning=True, raise_exception=Fal
                 "to symmetric by average with its transpose.",
                 stacklevel=2,
             )
-        if sp.issparse(array):
+        if sparse_module.issparse(array):
             conversion = "to" + array.format
             array = getattr(0.5 * (array + array.T), conversion)()
         else:
