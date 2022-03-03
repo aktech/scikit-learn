@@ -143,14 +143,21 @@ def _set_diag(laplacian, value, norm_laplacian):
     """
     n_nodes = laplacian.shape[0]
     # We need all entries in the diagonal to values
-    if not sparse.isspmatrix(laplacian):
+
+    xp, _ = get_namespace(laplacian.data)
+    if xp.__name__ == 'cupy.array_api':
+        from cupyx.scipy import sparse as cupy_sparse
+        sparse_ = cupy_sparse
+    else:
+        sparse_ = sparse
+    if not sparse_.isspmatrix(laplacian):
         if norm_laplacian:
             laplacian.flat[:: n_nodes + 1] = value
     else:
         laplacian = laplacian.tocoo()
         if norm_laplacian:
             diag_idx = laplacian.row == laplacian.col
-            laplacian.data[diag_idx] = value
+            laplacian.data[xp.asarray(diag_idx)] = value
         # If the matrix has a small number of diagonals (as in the
         # case of structured matrices coming from images), the
         # dia format might be best suited for matvec products:
