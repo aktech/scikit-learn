@@ -21,6 +21,7 @@ from ..utils import (
     check_symmetric,
 )
 from ..utils._arpack import _init_arpack_v0
+from ..utils.array_compatibility import get_namespace
 from ..utils.extmath import _deterministic_vector_sign_flip
 from ..utils.fixes import lobpcg
 from ..metrics.pairwise import rbf_kernel
@@ -48,25 +49,41 @@ def _graph_connected_component(graph, node_id):
         node.
     """
     n_node = graph.shape[0]
-    if sparse.issparse(graph):
+    xp, array_api = get_namespace(graph.data)
+    if xp.__name__ == 'cupy.array_api':
+        from cupyx.scipy import sparse as cupy_sparse
+        sparse_ = cupy_sparse
+    else:
+        sparse_ = sparse
+
+    if sparse_.issparse(graph):
         # speed up row-wise access to boolean connection mask
         graph = graph.tocsr()
-    connected_nodes = np.zeros(n_node, dtype=bool)
-    nodes_to_explore = np.zeros(n_node, dtype=bool)
+    connected_nodes = xp.zeros(n_node, dtype=xp.bool)
+    nodes_to_explore = xp.zeros(n_node, dtype=xp.bool)
     nodes_to_explore[node_id] = True
     for _ in range(n_node):
-        last_num_component = connected_nodes.sum()
-        np.logical_or(connected_nodes, nodes_to_explore, out=connected_nodes)
-        if last_num_component >= connected_nodes.sum():
+        last_num_component = xp.sum(xp.astype(connected_nodes, 'i'))
+        connected_nodes = xp.logical_or(connected_nodes, nodes_to_explore)
+        if last_num_component >= xp.sum(xp.astype(connected_nodes, 'i')):
             break
-        indices = np.where(nodes_to_explore)[0]
-        nodes_to_explore.fill(False)
+        indices = xp.nonzero(nodes_to_explore)[0]
+
+        if array_api:
+            nodes_to_explore._array.fill(False)
+        else:
+            nodes_to_explore.fill(False)
+
         for i in indices:
-            if sparse.issparse(graph):
-                neighbors = graph[i].toarray().ravel()
+            if sparse_.issparse(graph):
+                neighbors = graph[i._array if hasattr(i, '_array') else i].toarray().ravel()
             else:
-                neighbors = graph[i]
-            np.logical_or(nodes_to_explore, neighbors, out=nodes_to_explore)
+                neighbors = graph[i._array if hasattr(i, '_array') else i]
+
+            nodes_to_explore = xp.logical_or(
+                xp.asarray(nodes_to_explore),
+                xp.astype(xp.asarray(neighbors), xp.bool)
+            )
     return connected_nodes
 
 
@@ -84,9 +101,18 @@ def _graph_is_connected(graph):
     is_connected : bool
         True means the graph is fully connected and False means not.
     """
-    if sparse.isspmatrix(graph):
+    xp, array_api = get_namespace(graph.data)
+    if xp.__name__ == 'cupy.array_api':
+        from cupyx.scipy import sparse as cupy_sparse
+        from cupyx.scipy.sparse import csgraph
+        sparse_ = cupy_sparse
+        connected_comp = csgraph.connected_components
+    else:
+        sparse_ = sparse
+        connected_comp = connected_components
+    if sparse_.isspmatrix(graph):
         # sparse graph, find all the connected components
-        n_connected_components, _ = connected_components(graph)
+        n_connected_components, _ = connected_comp(graph)
         return n_connected_components == 1
     else:
         # dense graph, find all connected components start from node 0
@@ -117,25 +143,36 @@ def _set_diag(laplacian, value, norm_laplacian):
     """
     n_nodes = laplacian.shape[0]
     # We need all entries in the diagonal to values
-    if not sparse.isspmatrix(laplacian):
+
+    xp, _ = get_namespace(laplacian.data)
+    if xp.__name__ == 'cupy.array_api':
+        from cupyx.scipy import sparse as cupy_sparse
+        sparse_ = cupy_sparse
+    else:
+        sparse_ = sparse
+    if not sparse_.isspmatrix(laplacian):
         if norm_laplacian:
             laplacian.flat[:: n_nodes + 1] = value
     else:
         laplacian = laplacian.tocoo()
         if norm_laplacian:
             diag_idx = laplacian.row == laplacian.col
-            laplacian.data[diag_idx] = value
+            laplacian.data[xp.asarray(diag_idx)] = value
         # If the matrix has a small number of diagonals (as in the
         # case of structured matrices coming from images), the
         # dia format might be best suited for matvec products:
-        n_diags = np.unique(laplacian.row - laplacian.col).size
-        if n_diags <= 7:
-            # 3 or less outer diagonals on each side
-            laplacian = laplacian.todia()
-        else:
-            # csr has the fastest matvec and is thus best suited to
-            # arpack
-            laplacian = laplacian.tocsr()
+
+        # NOTE: Commenting this out as laplacian.todia() is not
+        # implemented for cupy
+        # n_diags = np.unique(laplacian.row - laplacian.col).size
+        # if n_diags <= 7:
+        #     # 3 or less outer diagonals on each side
+        #     laplacian = laplacian.todia()
+        # else:
+        #     # csr has the fastest matvec and is thus best suited to
+        #     # arpack
+        #     laplacian = laplacian.tocsr()
+        laplacian = laplacian.tocsr()
     return laplacian
 
 
@@ -230,7 +267,9 @@ def spectral_embedding(
       Andrew V. Knyazev
       <10.1137/S1064827500366124>`
     """
-    adjacency = check_symmetric(adjacency)
+    xp, _ = get_namespace(adjacency.data)
+    if xp.__name__ != 'cupy.array_api':
+        adjacency = check_symmetric(adjacency)
 
     try:
         from pyamg import smoothed_aggregation_solver
@@ -255,10 +294,10 @@ def spectral_embedding(
     if drop_first:
         n_components = n_components + 1
 
-    if not _graph_is_connected(adjacency):
-        warnings.warn(
-            "Graph is not fully connected, spectral embedding may not work as expected."
-        )
+    # if not _graph_is_connected(adjacency):
+    #     warnings.warn(
+    #         "Graph is not fully connected, spectral embedding may not work as expected."
+    #     )
 
     laplacian, dd = csgraph_laplacian(
         adjacency, normed=norm_laplacian, return_diag=True
@@ -295,13 +334,22 @@ def spectral_embedding(
             # to spare a memory allocation of a possibly very large array
             laplacian *= -1
             v0 = _init_arpack_v0(laplacian.shape[0], random_state)
-            _, diffusion_map = eigsh(
-                laplacian, k=n_components, sigma=1.0, which="LM", tol=eigen_tol, v0=v0
-            )
+
+            print("Finding eigsh")
+            if xp.__name__ == 'cupy.array_api':
+                from cupyx.scipy.sparse.linalg import eigsh as cupy_eigsh
+                _, diffusion_map = cupy_eigsh(
+                    laplacian, k=n_components, which="LM", tol=eigen_tol
+                )
+            else:
+                _, diffusion_map = eigsh(
+                    laplacian, k=n_components, which="LM", tol=eigen_tol, #sigma=1.0, v0=v0
+                )
+            print("Found eigsh")
             embedding = diffusion_map.T[n_components::-1]
             if norm_laplacian:
                 # recover u = D^-1/2 x from the eigenvector output x
-                embedding = embedding / dd
+                embedding = embedding / (dd._array if hasattr(dd, '_array') else dd)
         except RuntimeError:
             # When submatrices are exactly singular, an LU decomposition
             # in arpack fails. We fallback to lobpcg
@@ -382,10 +430,13 @@ def spectral_embedding(
                 raise ValueError
 
     embedding = _deterministic_vector_sign_flip(embedding)
+    print("Returning embedding")
     if drop_first:
-        return embedding[1:n_components].T
+        return xp.asarray(embedding[1:n_components].T)
+        # return embedding[1:n_components].T
     else:
-        return embedding[:n_components].T
+        return xp.asarray(embedding[:n_components].T)
+        # return embedding[:n_components].T
 
 
 class SpectralEmbedding(BaseEstimator):

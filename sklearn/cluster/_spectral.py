@@ -16,7 +16,8 @@ from scipy.linalg import LinAlgError, qr, svd
 from scipy.sparse import csc_matrix
 
 from ..base import BaseEstimator, ClusterMixin
-from ..utils import check_random_state, as_float_array, check_scalar
+from ..utils import as_float_array, check_random_state, check_scalar
+from ..utils.array_compatibility import get_namespace
 from ..metrics.pairwise import pairwise_kernels
 from ..neighbors import kneighbors_graph, NearestNeighbors
 from ..manifold import spectral_embedding
@@ -48,8 +49,9 @@ def cluster_qr(vectors):
 
     """
 
+    xp, _ = get_namespace(vectors)
     k = vectors.shape[1]
-    _, _, piv = qr(vectors.T, pivoting=True)
+    _, _, piv = qr(xp.asarray(vectors.T), pivoting=True)
     ut, _, v = svd(vectors[piv[:k], :].T)
     vectors = abs(np.dot(vectors, np.dot(ut, v.conj())))
     return vectors.argmax(axis=1)
@@ -112,9 +114,22 @@ def discretize(
 
     random_state = check_random_state(random_state)
 
-    vectors = as_float_array(vectors, copy=copy)
+    # vectors = as_float_array(vectors, copy=copy)
 
-    eps = np.finfo(float).eps
+    xp, array_api = get_namespace(vectors)
+
+    if xp.__name__ == 'cupy.array_api':
+        from cupyx.scipy.sparse import csc_matrix as cupy_csc_matrix
+        csc_matrix_ = cupy_csc_matrix
+    else:
+        csc_matrix_ = csc_matrix
+
+    if array_api:
+        dot = xp.vecdot
+    else:
+        dot = xp.dot
+
+    eps = xp.finfo(float).eps
     n_samples, n_components = vectors.shape
 
     # Normalize the eigenvectors to an equal length of a vector of ones.
@@ -123,15 +138,20 @@ def discretize(
     # eigenvectors to lie in a specific quadrant to make the discretization
     # search easier.
     norm_ones = np.sqrt(n_samples)
+
+    def norm(vector):
+        """Norm function as its not available in Array API"""
+        return xp.sqrt(xp.sum(xp.square(vector)))
+
     for i in range(vectors.shape[1]):
-        vectors[:, i] = (vectors[:, i] / np.linalg.norm(vectors[:, i])) * norm_ones
+        vectors[:, i] = (vectors[:, i] / norm(vectors[:, i])) * norm_ones
         if vectors[0, i] != 0:
-            vectors[:, i] = -1 * vectors[:, i] * np.sign(vectors[0, i])
+            vectors[:, i] = -1 * vectors[:, i] * xp.sign(vectors[0, i])
 
     # Normalize the rows of the eigenvectors.  Samples should lie on the unit
     # hypersphere centered at the origin.  This transforms the samples in the
     # embedding space to the space of partition matrices.
-    vectors = vectors / np.sqrt((vectors**2).sum(axis=1))[:, np.newaxis]
+    vectors = vectors / xp.expand_dims(xp.sqrt(xp.sum(vectors ** 2, axis=1)), axis=1)
 
     svd_restarts = 0
     has_converged = False
@@ -142,18 +162,20 @@ def discretize(
 
         # Initialize first column of rotation matrix with a row of the
         # eigenvectors
-        rotation = np.zeros((n_components, n_components))
-        rotation[:, 0] = vectors[random_state.randint(n_samples), :].T
+        rotation = xp.zeros((n_components, n_components))
+        # xp.permute_dims: Just a fancy way to transpose
+        rotation[:, 0] = xp.permute_dims(vectors[random_state.randint(n_samples), :], axes=(0,))
 
         # To initialize the rest of the rotation matrix, find the rows
         # of the eigenvectors that are as orthogonal to each other as
         # possible
-        c = np.zeros(n_samples)
+        c = xp.zeros(n_samples)
         for j in range(1, n_components):
             # Accumulate c to ensure row is as orthogonal as possible to
             # previous picks as well as current one
-            c += np.abs(np.dot(vectors, rotation[:, j - 1]))
-            rotation[:, j] = vectors[c.argmin(), :].T
+            c += xp.abs(dot(vectors, rotation[:, j - 1]))
+            # xp.permute_dims: Just a fancy way to transpose
+            rotation[:, j] = xp.permute_dims(vectors[int(xp.argmin(c)), :], axes=(0,))
 
         last_objective_value = 0.0
         n_iter = 0
@@ -161,30 +183,33 @@ def discretize(
         while not has_converged:
             n_iter += 1
 
-            t_discrete = np.dot(vectors, rotation)
+            t_discrete = dot(vectors, rotation)
 
-            labels = t_discrete.argmax(axis=1)
-            vectors_discrete = csc_matrix(
-                (np.ones(len(labels)), (np.arange(0, n_samples), labels)),
+            labels = xp.argmax(t_discrete, axis=1)
+            vectors_discrete = csc_matrix_(
+                (xp.ones(labels.shape[0]), (xp.arange(0, n_samples), labels)),
                 shape=(n_samples, n_components),
             )
 
             t_svd = vectors_discrete.T * vectors
 
             try:
-                U, S, Vh = np.linalg.svd(t_svd)
+                U, S, Vh = xp.linalg.svd(xp.asarray(t_svd))
             except LinAlgError:
                 svd_restarts += 1
                 print("SVD did not converge, randomizing and trying again")
                 break
 
-            ncut_value = 2.0 * (n_samples - S.sum())
+            ncut_value = 2.0 * (n_samples - xp.sum(S))
+            # import ipdb as pdb; pdb.set_trace()
             if (abs(ncut_value - last_objective_value) < eps) or (n_iter > n_iter_max):
                 has_converged = True
             else:
                 # otherwise calculate rotation and continue
                 last_objective_value = ncut_value
-                rotation = np.dot(Vh.T, U.T)
+                # TODO: Remove xp.asarray after pulling latest master as .T returns old array
+                # instead of Array API array.
+                rotation = dot(xp.asarray(Vh.T), xp.asarray(U.T))
 
     if not has_converged:
         raise LinAlgError("SVD did not converge")
