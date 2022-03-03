@@ -161,14 +161,18 @@ def _set_diag(laplacian, value, norm_laplacian):
         # If the matrix has a small number of diagonals (as in the
         # case of structured matrices coming from images), the
         # dia format might be best suited for matvec products:
-        n_diags = np.unique(laplacian.row - laplacian.col).size
-        if n_diags <= 7:
-            # 3 or less outer diagonals on each side
-            laplacian = laplacian.todia()
-        else:
-            # csr has the fastest matvec and is thus best suited to
-            # arpack
-            laplacian = laplacian.tocsr()
+
+        # NOTE: Commenting this out as laplacian.todia() is not
+        # implemented for cupy
+        # n_diags = np.unique(laplacian.row - laplacian.col).size
+        # if n_diags <= 7:
+        #     # 3 or less outer diagonals on each side
+        #     laplacian = laplacian.todia()
+        # else:
+        #     # csr has the fastest matvec and is thus best suited to
+        #     # arpack
+        #     laplacian = laplacian.tocsr()
+        laplacian = laplacian.tocsr()
     return laplacian
 
 
@@ -309,8 +313,6 @@ def spectral_embedding(
         # /lobpcg/lobpcg.py#L237
         # or matlab:
         # https://www.mathworks.com/matlabcentral/fileexchange/48-lobpcg-m
-        if xp.__name__ == 'cupy.array_api':
-            laplacian = laplacian.toarray()
         laplacian = _set_diag(laplacian, 1, norm_laplacian)
 
         # Here we'll use shift-invert mode for fast eigenvalues
@@ -341,7 +343,7 @@ def spectral_embedding(
                 )
             else:
                 _, diffusion_map = eigsh(
-                    laplacian, k=n_components, sigma=1.0, which="LM", tol=eigen_tol, v0=v0
+                    laplacian, k=n_components, which="LM", tol=eigen_tol, #sigma=1.0, v0=v0
                 )
             print("Found eigsh")
             embedding = diffusion_map.T[n_components::-1]
