@@ -145,9 +145,9 @@ def discretize(
 
     for i in range(vectors.shape[1]):
         vectors[:, i] = (vectors[:, i] / norm(vectors[:, i])) * norm_ones
-        if vectors[0, i] != 0:
-            vectors[:, i] = -1 * vectors[:, i] * xp.sign(vectors[0, i])
-
+        # if vectors[0, i] != 0:
+            # vectors[:, i] = -1 * vectors[:, i] * xp.sign(vectors[0, i])
+        vectors[:, i] = xp.where(vectors[0, i], -1 * vectors[:, i] * xp.sign(vectors[0, i]), vectors[:, i])
     # Normalize the rows of the eigenvectors.  Samples should lie on the unit
     # hypersphere centered at the origin.  This transforms the samples in the
     # embedding space to the space of partition matrices.
@@ -175,7 +175,8 @@ def discretize(
             # previous picks as well as current one
             c += xp.abs(dot(vectors, rotation[:, j - 1]))
             # xp.permute_dims: Just a fancy way to transpose
-            rotation[:, j] = xp.permute_dims(vectors[int(xp.argmin(c)), :], axes=(0,))
+            amin = int(xp.argmin(c))
+            rotation[:, j] = xp.permute_dims(vectors[amin, :], axes=(0,))
 
         last_objective_value = 0.0
         n_iter = 0
@@ -397,7 +398,12 @@ def spectral_clustering(
     elif assign_labels == "cluster_qr":
         labels = cluster_qr(maps)
     else:
+        import time
+        # with open("maps", 'wb') as fp:
+        #     np.save(fp, maps._array.get() if hasattr(maps._array, 'get') else maps._array)
+        t0 = time.time()
         labels = discretize(maps, random_state=random_state)
+        print(f"Time taken for discretize: {time.time() - t0}")
 
     return labels
 
